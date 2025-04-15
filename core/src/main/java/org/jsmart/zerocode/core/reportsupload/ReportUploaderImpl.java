@@ -14,6 +14,7 @@ import org.slf4j.LoggerFactory;
 import java.io.File;
 import java.io.IOException;
 import java.net.URISyntaxException;
+import java.nio.file.*;
 
 public class ReportUploaderImpl implements ReportUploader {
 
@@ -42,13 +43,30 @@ public class ReportUploaderImpl implements ReportUploader {
         }
 
         setDefaultUploadLimit();
-        File repoDir = new File(ZeroCodeReportConstants.REPORT_UPLOAD_DIR, ".git");
-        createParentDirectoryIfNotExists(repoDir);
+        createParentDirectoryIfNotExists(new File(ZeroCodeReportConstants.REPORT_UPLOAD_DIR));
 
-        try (Git git = initializeOrOpenGitRepository(repoDir)) {
+        try (Git git = initializeOrOpenGitRepository(ZeroCodeReportConstants.REPORT_UPLOAD_DIR)) {
             addRemoteRepositoryIfMissing(git);
-            addAndCommitChanges(git);
-            pushToRemoteRepository(git);
+
+            //Copy files to the repository
+            copyFile(ZeroCodeReportConstants.TARGET_FILE_NAME,ZeroCodeReportConstants.REPORT_UPLOAD_DIR);
+            copyFile(
+                    ZeroCodeReportConstants.TARGET_FULL_REPORT_DIR + ZeroCodeReportConstants.TARGET_FULL_REPORT_CSV_FILE_NAME,
+                    ZeroCodeReportConstants.REPORT_UPLOAD_DIR);
+
+            copyFirstFileUnder2MBMatchingPattern(
+                    ZeroCodeReportConstants.SUREFIRE_REPORT_DIR,
+                    "*.xml",
+                    ZeroCodeReportConstants.REPORT_UPLOAD_DIR
+            );
+            copyFirstFileUnder2MBMatchingPattern(
+                    ZeroCodeReportConstants.TARGET_FULL_REPORT_DIR + "/logs",
+                    "*.log",
+                    ZeroCodeReportConstants.REPORT_UPLOAD_DIR
+            );
+
+            //addAndCommitChanges(git);
+            //pushToRemoteRepository(git);
         } catch (Exception e) {
             LOGGER.warn("Report upload failed: {}", e.getMessage());
         }
@@ -103,17 +121,48 @@ public class ReportUploaderImpl implements ReportUploader {
         }
     }
 
-    private Git initializeOrOpenGitRepository(File repoDir) throws IOException, GitAPIException {
-        if (repoDir.exists()) {
+    private Git initializeOrOpenGitRepository(String repoUploadDir) throws IOException, GitAPIException {
+        if (new File(repoUploadDir, ".git").exists()) {
             LOGGER.debug("Existing Git repository found.");
             return Git.open(new File(ZeroCodeReportConstants.REPORT_UPLOAD_DIR));
         } else {
             LOGGER.debug("Initializing a new Git repository...");
             return Git.cloneRepository()
                     .setURI(reportsRepo)
-                    .setDirectory(repoDir)
+                    .setDirectory(new File(repoUploadDir))
                     .setCredentialsProvider(new UsernamePasswordCredentialsProvider(reportsRepoUsername, reportsRepoToken))
                     .call();
+        }
+    }
+
+    private void copyFile(String sourcePath, String targetDirPath) throws IOException {
+        File sourceFile = new File(sourcePath);
+        if (!sourceFile.exists()) {
+            LOGGER.warn("File not found: {}", sourcePath);
+            return;
+        }
+        if (sourceFile.length() <= reportsRepoMaxUploadLimitMb * 1024 * 1024) {
+            Files.copy(sourceFile.toPath(), Paths.get(targetDirPath, sourceFile.getName()), StandardCopyOption.REPLACE_EXISTING);
+            LOGGER.debug("File copied: {}", sourceFile.getName());
+        } else {
+            LOGGER.warn("File size exceeds {} MB. Skipping copy: {}", reportsRepoMaxUploadLimitMb,sourceFile.getName());
+        }
+    }
+
+    private void copyFirstFileUnder2MBMatchingPattern(String dirPath, String globPattern, String targetDirPath) throws IOException {
+        Path dir = Paths.get(dirPath);
+        final long maxSizeInBytes = reportsRepoMaxUploadLimitMb * 1024 * 1024;
+
+        try (DirectoryStream<Path> stream = Files.newDirectoryStream(dir, globPattern)) {
+            for (Path entry : stream) {
+                if (Files.isRegularFile(entry) && Files.size(entry) <= maxSizeInBytes) {
+                    Path target = Paths.get(targetDirPath, entry.getFileName().toString());
+                    Files.copy(entry, target, StandardCopyOption.REPLACE_EXISTING);
+                    LOGGER.info("Copied first matched file: {}", entry.getFileName());
+                    return;
+                }
+            }
+            LOGGER.warn("No file under 2MB found matching pattern: {}", globPattern);
         }
     }
 
